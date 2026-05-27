@@ -228,4 +228,4 @@ async def messages(request: Request):
 
 @app.get("/")
 def root():
-    return {"status": "ok", "total_tools": len(TOOLS["tools"])}ç
+    return {"status": "ok", "total_tools": len(TOOLS["tools"])}
