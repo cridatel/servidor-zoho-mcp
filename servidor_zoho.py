@@ -8,76 +8,60 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from typing import Dict, Any
 
-# 1. CONFIGURACIÓN DE ZOHO
+# CONFIGURACIÓN
 ZOHO_CLIENT_ID = os.environ["ZOHO_CLIENT_ID"]
 ZOHO_CLIENT_SECRET = os.environ["ZOHO_CLIENT_SECRET"]
 ZOHO_REFRESH_TOKEN = os.environ["ZOHO_REFRESH_TOKEN"]
 ZOHO_ORG_ID = os.environ["ZOHO_ORG_ID"]
-ZOHO_API_DOMAIN = os.environ.get("ZOHO_API_DOMAIN", "https://www.zohoapis.eu")
+ZOHO_API = os.environ.get("ZOHO_API_DOMAIN", "https://www.zohoapis.eu")
 
-# 2. OBTENER ACCESS TOKEN
-def get_access_token():
-    """Obtiene un access_token usando el refresh_token."""
-    url = "https://accounts.zoho.eu/oauth/v2/token"
-    params = {
+def get_token():
+    r = requests.post("https://accounts.zoho.eu/oauth/v2/token", params={
         "refresh_token": ZOHO_REFRESH_TOKEN,
         "client_id": ZOHO_CLIENT_ID,
         "client_secret": ZOHO_CLIENT_SECRET,
         "grant_type": "refresh_token"
-    }
-    response = requests.post(url, params=params)
-    token = response.json().get("access_token")
-    print(f"=== TOKEN: {token[:20]}... ===")
-    return token
+    })
+    return r.json()["access_token"]
 
-# 3. LLAMADA GENÉRICA A LA API DE ZOHO
-def zoho_api(endpoint, params=None):
-    """Hace una llamada GET a la API de Zoho Inventory."""
-    token = get_access_token()
-    headers = {
+def get_items():
+    token = get_token()
+    r = requests.get(f"{ZOHO_API}/inventory/v1/items", headers={
         "Authorization": f"Zoho-oauthtoken {token}",
         "orgId": ZOHO_ORG_ID
-    }
-    url = f"{ZOHO_API_DOMAIN}/inventory/v1/{endpoint}"
-    print(f"=== ZOHO URL: {url} ===")
-    response = requests.get(url, headers=headers, params=params)
-    data = response.json()
-    print(f"=== ZOHO RESPONSE ({response.status_code}) ===")
-    print(json.dumps(data, indent=2)[:500])
-    return data
+    }, params={"organization_id": ZOHO_ORG_ID})
+    return r.json().get("items", [])
 
-# 4. APP FASTAPI
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# 5. HERRAMIENTAS DISPONIBLES
 TOOLS = {
     "tools": [
         {
             "name": "buscar_productos",
-            "description": "Busca productos en Zoho Inventory por nombre o SKU.",
+            "description": "Busca productos por nombre o SKU.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "keyword": {"type": "string", "description": "Palabra clave para buscar por nombre."},
-                    "sku": {"type": "string", "description": "SKU del producto."},
-                    "limite": {"type": "integer", "description": "Máximo de productos.", "default": 20}
+                    "keyword": {"type": "string"},
+                    "sku": {"type": "string"},
+                    "limite": {"type": "integer", "default": 20}
                 }
             }
         },
         {
             "name": "consultar_stock",
-            "description": "Consulta el stock detallado de un producto por su SKU exacto.",
+            "description": "Stock de un producto por SKU exacto.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "sku": {"type": "string", "description": "SKU exacto del producto."}
+                    "sku": {"type": "string"}
                 }
             }
         },
         {
             "name": "productos_stock_bajo",
-            "description": "Lista productos con stock bajo (menos de 10 unidades).",
+            "description": "Productos con menos de 10 unidades.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -87,152 +71,99 @@ TOOLS = {
         },
         {
             "name": "resumen_inventario",
-            "description": "Muestra resumen general del inventario.",
+            "description": "Resumen del inventario.",
             "inputSchema": {"type": "object", "properties": {}}
         }
     ]
 }
 
-# 6. COLA DE MENSAJES POR SESIÓN
 sessions: Dict[str, asyncio.Queue] = {}
 
-# 7. ENDPOINT SSE
 @app.get("/sse")
 async def sse(request: Request):
-    session_id = request.query_params.get("session_id", str(uuid.uuid4()))
-    queue: asyncio.Queue = asyncio.Queue()
-    sessions[session_id] = queue
-    
-    async def generator():
+    sid = request.query_params.get("session_id", str(uuid.uuid4()))
+    q = asyncio.Queue()
+    sessions[sid] = q
+    async def gen():
         try:
-            yield f"event: endpoint\ndata: /messages?session_id={session_id}\n\n"
+            yield f"event: endpoint\ndata: /messages?session_id={sid}\n\n"
             while True:
                 try:
-                    message = await asyncio.wait_for(queue.get(), timeout=15)
-                    yield f"event: message\ndata: {message}\n\n"
+                    m = await asyncio.wait_for(q.get(), timeout=15)
+                    yield f"event: message\ndata: {m}\n\n"
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
         except asyncio.CancelledError:
             pass
         finally:
-            sessions.pop(session_id, None)
-    
-    return StreamingResponse(generator(), media_type="text/event-stream",
+            sessions.pop(sid, None)
+    return StreamingResponse(gen(), media_type="text/event-stream",
                            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-# 8. ENDPOINT MENSAJES
 @app.post("/messages")
 async def messages(request: Request):
     body = await request.json()
-    session_id = request.query_params.get("session_id", "")
-    
+    sid = request.query_params.get("session_id", "")
     method = body.get("method", "")
-    msg_id = body.get("id", None)
+    mid = body.get("id", None)
     
-    if msg_id is None:
+    if mid is None:
         return {}
     
-    respuesta = None
+    r = None
     
     if method == "initialize":
-        respuesta = {
-            "jsonrpc": "2.0",
-            "id": msg_id,
-            "result": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "Zoho Inventory Server", "version": "1.0.0"}
-            }
-        }
-    
+        r = {"jsonrpc": "2.0", "id": mid, "result": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "Zoho Inventory", "version": "1.0.0"}
+        }}
     elif method == "tools/list":
-        respuesta = {"jsonrpc": "2.0", "id": msg_id, "result": TOOLS}
-    
+        r = {"jsonrpc": "2.0", "id": mid, "result": TOOLS}
     elif method == "tools/call":
-        params = body.get("params", {})
-        tool_name = params.get("name", "")
-        arguments = params.get("arguments", {})
+        args = body.get("params", {}).get("arguments", {})
+        name = body.get("params", {}).get("name", "")
         
-        if tool_name == "buscar_productos":
-            keyword = arguments.get("keyword", "")
-            sku = arguments.get("sku", "")
-            limite = arguments.get("limite", 20)
-            
-            data = zoho_api("items", params={"organization_id": ZOHO_ORG_ID})
-            
-            if "items" in data:
-                items = data["items"]
-                if keyword:
-                    items = [i for i in items if keyword.lower() in i.get("name", "").lower()]
-                if sku:
-                    items = [i for i in items if sku.lower() in i.get("sku", "").lower()]
-                results = items[:limite]
-            else:
-                results = {"error": "No se pudieron obtener productos", "raw": data}
+        try:
+            items = get_items()
+        except Exception as e:
+            items = []
         
-        elif tool_name == "consultar_stock":
-            sku = arguments.get("sku", "")
-            data = zoho_api(f"items?sku={sku}")
-            
-            print("=== CONSULTAR STOCK DATA ===")
-            print(json.dumps(data, indent=2)[:500])
-            
-            if "items" in data and len(data["items"]) > 0:
-                item = data["items"][0]
-                results = [{
-                    "name": item.get("name"),
-                    "sku": item.get("sku"),
-                    "stock": item.get("stock_on_hand"),
-                    "precio": item.get("rate")
-                }]
-            else:
-                results = {"error": f"No se encontró el SKU: {sku}", "raw": data}
-        
-        elif tool_name == "productos_stock_bajo":
-            limite = arguments.get("limite", 50)
-            data = zoho_api("items", params={"organization_id": ZOHO_ORG_ID})
-            
-            if "items" in data:
-                items = [i for i in data["items"] if i.get("stock_on_hand", 0) < 10]
-                results = items[:limite]
-            else:
-                results = {"error": "No se pudieron obtener productos", "raw": data}
-        
-        elif tool_name == "resumen_inventario":
-            data = zoho_api("items", params={"organization_id": ZOHO_ORG_ID})
-            
-            if "items" in data:
-                items = data["items"]
-                total_productos = len(items)
-                total_stock = sum(i.get("stock_on_hand", 0) for i in items)
-                valor_total = sum(i.get("stock_on_hand", 0) * i.get("rate", 0) for i in items)
-                
-                results = {
-                    "total_productos": total_productos,
-                    "total_stock": total_stock,
-                    "valor_total_inventario": round(valor_total, 2)
-                }
-            else:
-                results = {"error": "No se pudieron obtener datos", "raw": data}
-        
-        else:
-            results = {"error": f"Herramienta no encontrada: {tool_name}"}
-        
-        respuesta = {
-            "jsonrpc": "2.0",
-            "id": msg_id,
-            "result": {
-                "content": [{"type": "text", "text": json.dumps(results, indent=2, ensure_ascii=False)}]
+        if name == "buscar_productos":
+            kw = args.get("keyword", "").lower()
+            sk = args.get("sku", "").lower()
+            lim = args.get("limite", 20)
+            res = items
+            if kw:
+                res = [i for i in res if kw in i.get("name", "").lower()]
+            if sk:
+                res = [i for i in res if sk in i.get("sku", "").lower()]
+            res = res[:lim]
+        elif name == "consultar_stock":
+            sk = args.get("sku", "").lower()
+            res = [i for i in items if i.get("sku", "").lower() == sk]
+            if not res:
+                res = {"error": f"No se encontró: {sk}"}
+        elif name == "productos_stock_bajo":
+            lim = args.get("limite", 50)
+            res = [i for i in items if i.get("stock_on_hand", 0) < 10][:lim]
+        elif name == "resumen_inventario":
+            res = {
+                "total_productos": len(items),
+                "total_stock": sum(i.get("stock_on_hand", 0) for i in items),
+                "valor_total": round(sum(i.get("stock_on_hand", 0) * i.get("rate", 0) for i in items), 2)
             }
-        }
-    
+        else:
+            res = {"error": f"Herramienta no encontrada: {name}"}
+        
+        r = {"jsonrpc": "2.0", "id": mid, "result": {
+            "content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]
+        }}
     else:
-        respuesta = {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": "Method not found"}}
+        r = {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "Method not found"}}
     
-    respuesta_str = json.dumps(respuesta)
-    if session_id in sessions:
-        await sessions[session_id].put(respuesta_str)
-    
+    if sid in sessions:
+        await sessions[sid].put(json.dumps(r))
     return {"status": "ok"}
 
 @app.get("/")
