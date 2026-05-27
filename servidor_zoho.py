@@ -16,21 +16,36 @@ ZOHO_ORG_ID = os.environ["ZOHO_ORG_ID"]
 ZOHO_API = os.environ.get("ZOHO_API_DOMAIN", "https://www.zohoapis.eu")
 
 def get_token():
-    r = requests.post("https://accounts.zoho.eu/oauth/v2/token", params={
-        "refresh_token": ZOHO_REFRESH_TOKEN,
-        "client_id": ZOHO_CLIENT_ID,
-        "client_secret": ZOHO_CLIENT_SECRET,
-        "grant_type": "refresh_token"
-    })
-    return r.json()["access_token"]
+    try:
+        r = requests.post("https://accounts.zoho.eu/oauth/v2/token", params={
+            "refresh_token": ZOHO_REFRESH_TOKEN,
+            "client_id": ZOHO_CLIENT_ID,
+            "client_secret": ZOHO_CLIENT_SECRET,
+            "grant_type": "refresh_token"
+        })
+        token = r.json()["access_token"]
+        print(f"TOKEN OK: {token[:20]}...")
+        return token
+    except Exception as e:
+        print(f"ERROR TOKEN: {str(e)}")
+        raise
 
 def get_items():
-    token = get_token()
-    r = requests.get(f"{ZOHO_API}/inventory/v1/items", headers={
-        "Authorization": f"Zoho-oauthtoken {token}",
-        "orgId": ZOHO_ORG_ID
-    }, params={"organization_id": ZOHO_ORG_ID})
-    return r.json().get("items", [])
+    try:
+        token = get_token()
+        r = requests.get(f"{ZOHO_API}/inventory/v1/items", headers={
+            "Authorization": f"Zoho-oauthtoken {token}",
+            "orgId": ZOHO_ORG_ID
+        }, params={"organization_id": ZOHO_ORG_ID})
+        data = r.json()
+        items = data.get("items", [])
+        print(f"ITEMS OBTENIDOS: {len(items)}")
+        if items:
+            print(f"PRIMER ITEM: {items[0].get('name')} - {items[0].get('sku')}")
+        return items
+    except Exception as e:
+        print(f"ERROR get_items: {str(e)}")
+        return []
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -124,9 +139,12 @@ async def messages(request: Request):
         args = body.get("params", {}).get("arguments", {})
         name = body.get("params", {}).get("name", "")
         
+        print(f"HERRAMIENTA: {name}, ARGS: {args}")
+        
         try:
             items = get_items()
         except Exception as e:
+            print(f"ERROR: {e}")
             items = []
         
         if name == "buscar_productos":
@@ -139,6 +157,7 @@ async def messages(request: Request):
             if sk:
                 res = [i for i in res if sk in i.get("sku", "").lower()]
             res = res[:lim]
+            print(f"RESULTADOS: {len(res)}")
         elif name == "consultar_stock":
             sk = args.get("sku", "").lower()
             res = [i for i in items if i.get("sku", "").lower() == sk]
