@@ -15,38 +15,34 @@ ZOHO_REFRESH_TOKEN = os.environ["ZOHO_REFRESH_TOKEN"]
 ZOHO_ORG_ID = os.environ["ZOHO_ORG_ID"]
 ZOHO_API = os.environ.get("ZOHO_API_DOMAIN", "https://www.zohoapis.eu")
 
+# Caché
+_token_cache = None
+_items_cache = None
+
 def get_token():
-    try:
-        r = requests.post("https://accounts.zoho.eu/oauth/v2/token", params={
-            "refresh_token": ZOHO_REFRESH_TOKEN,
-            "client_id": ZOHO_CLIENT_ID,
-            "client_secret": ZOHO_CLIENT_SECRET,
-            "grant_type": "refresh_token"
-        })
-        token = r.json()["access_token"]
-        print(f"TOKEN OK: {token[:20]}...")
-        return token
-    except Exception as e:
-        print(f"ERROR TOKEN: {str(e)}")
-        raise
+    global _token_cache
+    if _token_cache:
+        return _token_cache
+    r = requests.post("https://accounts.zoho.eu/oauth/v2/token", params={
+        "refresh_token": ZOHO_REFRESH_TOKEN,
+        "client_id": ZOHO_CLIENT_ID,
+        "client_secret": ZOHO_CLIENT_SECRET,
+        "grant_type": "refresh_token"
+    })
+    _token_cache = r.json()["access_token"]
+    return _token_cache
 
 def get_items():
-    try:
-        token = get_token()
-        r = requests.get(f"{ZOHO_API}/inventory/v1/items", headers={
-            "Authorization": f"Zoho-oauthtoken {token}",
-            "orgId": ZOHO_ORG_ID
-        }, params={"organization_id": ZOHO_ORG_ID})
-        data = r.json()
-        items = data.get("items", [])
-        print(f"ITEMS OBTENIDOS: {len(items)}")
-        if items:
-            print(f"PRIMER ITEM: {items[0].get('name')} - SKU: '{items[0].get('sku')}'")
-            print(f"SKUs disponibles: {[i.get('sku') for i in items]}")
-        return items
-    except Exception as e:
-        print(f"ERROR get_items: {str(e)}")
-        return []
+    global _items_cache
+    if _items_cache:
+        return _items_cache
+    token = get_token()
+    r = requests.get(f"{ZOHO_API}/inventory/v1/items", headers={
+        "Authorization": f"Zoho-oauthtoken {token}",
+        "orgId": ZOHO_ORG_ID
+    }, params={"organization_id": ZOHO_ORG_ID})
+    _items_cache = r.json().get("items", [])
+    return _items_cache
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -140,31 +136,21 @@ async def messages(request: Request):
         args = body.get("params", {}).get("arguments", {})
         name = body.get("params", {}).get("name", "").replace("mcp_", "")
         
-        print(f"HERRAMIENTA: {name}, ARGS: {args}")
-        
         try:
             items = get_items()
-        except Exception as e:
-            print(f"ERROR: {e}")
+        except:
             items = []
         
         if name == "buscar_productos":
             kw = args.get("keyword", "").lower()
             sk = args.get("sku", "").lower()
             lim = args.get("limite", 20)
-            print(f"KW: '{kw}', SK: '{sk}'")
             res = items
             if kw:
-                for item in items:
-                    name_lower = item.get("name", "").lower()
-                    sku_lower = item.get("sku", "").lower()
-                    if kw in name_lower or kw in sku_lower:
-                        print(f"  COINCIDE: {item.get('name')} - SKU: '{item.get('sku')}'")
                 res = [i for i in res if kw in i.get("name", "").lower() or kw in i.get("sku", "").lower()]
             if sk:
                 res = [i for i in res if sk in i.get("sku", "").lower()]
             res = res[:lim]
-            print(f"RESULTADOS: {len(res)}")
         elif name == "consultar_stock":
             sk = args.get("sku", "").lower()
             res = [i for i in items if i.get("sku", "").lower() == sk]
