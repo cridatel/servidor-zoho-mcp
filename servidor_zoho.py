@@ -153,7 +153,7 @@ async def messages(request: Request):
             lim = args.get("limite", 20)
             res = items
             if kw:
-                res = [i for i in res if kw in i.get("name", "").lower()]
+                res = [i for i in res if kw in i.get("name", "").lower() or kw in i.get("sku", "").lower()]
             if sk:
                 res = [i for i in res if sk in i.get("sku", "").lower()]
             res = res[:lim]
