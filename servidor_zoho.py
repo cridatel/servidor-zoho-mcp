@@ -41,7 +41,8 @@ def get_items():
         items = data.get("items", [])
         print(f"ITEMS OBTENIDOS: {len(items)}")
         if items:
-            print(f"PRIMER ITEM: {items[0].get('name')} - {items[0].get('sku')}")
+            print(f"PRIMER ITEM: {items[0].get('name')} - SKU: '{items[0].get('sku')}'")
+            print(f"SKUs disponibles: {[i.get('sku') for i in items]}")
         return items
     except Exception as e:
         print(f"ERROR get_items: {str(e)}")
@@ -151,8 +152,14 @@ async def messages(request: Request):
             kw = args.get("keyword", "").lower()
             sk = args.get("sku", "").lower()
             lim = args.get("limite", 20)
+            print(f"KW: '{kw}', SK: '{sk}'")
             res = items
             if kw:
+                for item in items:
+                    name_lower = item.get("name", "").lower()
+                    sku_lower = item.get("sku", "").lower()
+                    if kw in name_lower or kw in sku_lower:
+                        print(f"  COINCIDE: {item.get('name')} - SKU: '{item.get('sku')}'")
                 res = [i for i in res if kw in i.get("name", "").lower() or kw in i.get("sku", "").lower()]
             if sk:
                 res = [i for i in res if sk in i.get("sku", "").lower()]
