@@ -137,7 +137,7 @@ async def messages(request: Request):
         r = {"jsonrpc": "2.0", "id": mid, "result": TOOLS}
     elif method == "tools/call":
         args = body.get("params", {}).get("arguments", {})
-        name = body.get("params", {}).get("name", "")
+        name = body.get("params", {}).get("name", "").replace("mcp_", "")
         
         print(f"HERRAMIENTA: {name}, ARGS: {args}")
         
