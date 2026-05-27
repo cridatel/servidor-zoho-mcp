@@ -15,34 +15,35 @@ ZOHO_REFRESH_TOKEN = os.environ["ZOHO_REFRESH_TOKEN"]
 ZOHO_ORG_ID = os.environ["ZOHO_ORG_ID"]
 ZOHO_API = os.environ.get("ZOHO_API_DOMAIN", "https://www.zohoapis.eu")
 
-# Caché
-_token_cache = None
-_items_cache = None
+# Caché global
+items_cache = []
 
-def get_token():
-    global _token_cache
-    if _token_cache:
-        return _token_cache
-    r = requests.post("https://accounts.zoho.eu/oauth/v2/token", params={
-        "refresh_token": ZOHO_REFRESH_TOKEN,
-        "client_id": ZOHO_CLIENT_ID,
-        "client_secret": ZOHO_CLIENT_SECRET,
-        "grant_type": "refresh_token"
-    })
-    _token_cache = r.json()["access_token"]
-    return _token_cache
+def cargar_productos():
+    """Obtiene token y carga productos al iniciar."""
+    global items_cache
+    try:
+        # Token
+        r = requests.post("https://accounts.zoho.eu/oauth/v2/token", params={
+            "refresh_token": ZOHO_REFRESH_TOKEN,
+            "client_id": ZOHO_CLIENT_ID,
+            "client_secret": ZOHO_CLIENT_SECRET,
+            "grant_type": "refresh_token"
+        })
+        token = r.json()["access_token"]
+        
+        # Productos
+        r = requests.get(f"{ZOHO_API}/inventory/v1/items", headers={
+            "Authorization": f"Zoho-oauthtoken {token}",
+            "orgId": ZOHO_ORG_ID
+        }, params={"organization_id": ZOHO_ORG_ID})
+        items_cache = r.json().get("items", [])
+        print(f"PRODUCTOS CARGADOS: {len(items_cache)}")
+    except Exception as e:
+        print(f"ERROR CARGA INICIAL: {e}")
+        items_cache = []
 
-def get_items():
-    global _items_cache
-    if _items_cache:
-        return _items_cache
-    token = get_token()
-    r = requests.get(f"{ZOHO_API}/inventory/v1/items", headers={
-        "Authorization": f"Zoho-oauthtoken {token}",
-        "orgId": ZOHO_ORG_ID
-    }, params={"organization_id": ZOHO_ORG_ID})
-    _items_cache = r.json().get("items", [])
-    return _items_cache
+# Cargar al arrancar
+cargar_productos()
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -136,10 +137,7 @@ async def messages(request: Request):
         args = body.get("params", {}).get("arguments", {})
         name = body.get("params", {}).get("name", "").replace("mcp_", "")
         
-        try:
-            items = get_items()
-        except:
-            items = []
+        items = items_cache
         
         if name == "buscar_productos":
             kw = args.get("keyword", "").lower()
