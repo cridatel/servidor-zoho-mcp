@@ -7,6 +7,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from typing import Dict, Any
+import threading
+import time
 
 # CONFIGURACIÓN
 ZOHO_CLIENT_ID = os.environ["ZOHO_CLIENT_ID"]
@@ -15,35 +17,28 @@ ZOHO_REFRESH_TOKEN = os.environ["ZOHO_REFRESH_TOKEN"]
 ZOHO_ORG_ID = os.environ["ZOHO_ORG_ID"]
 ZOHO_API = os.environ.get("ZOHO_API_DOMAIN", "https://www.zohoapis.eu")
 
-# Caché global
 items_cache = []
 
-def cargar_productos():
-    """Obtiene token y carga productos al iniciar."""
+def refresh_cache():
     global items_cache
-    try:
-        # Token
-        r = requests.post("https://accounts.zoho.eu/oauth/v2/token", params={
-            "refresh_token": ZOHO_REFRESH_TOKEN,
-            "client_id": ZOHO_CLIENT_ID,
-            "client_secret": ZOHO_CLIENT_SECRET,
-            "grant_type": "refresh_token"
-        })
-        token = r.json()["access_token"]
-        
-        # Productos
-        r = requests.get(f"{ZOHO_API}/inventory/v1/items", headers={
-            "Authorization": f"Zoho-oauthtoken {token}",
-            "orgId": ZOHO_ORG_ID
-        }, params={"organization_id": ZOHO_ORG_ID})
-        items_cache = r.json().get("items", [])
-        print(f"PRODUCTOS CARGADOS: {len(items_cache)}")
-    except Exception as e:
-        print(f"ERROR CARGA INICIAL: {e}")
-        items_cache = []
+    while True:
+        try:
+            r = requests.post("https://accounts.zoho.eu/oauth/v2/token", params={
+                "refresh_token": ZOHO_REFRESH_TOKEN, "client_id": ZOHO_CLIENT_ID,
+                "client_secret": ZOHO_CLIENT_SECRET, "grant_type": "refresh_token"
+            })
+            token = r.json()["access_token"]
+            r = requests.get(f"{ZOHO_API}/inventory/v1/items", headers={
+                "Authorization": f"Zoho-oauthtoken {token}", "orgId": ZOHO_ORG_ID
+            }, params={"organization_id": ZOHO_ORG_ID})
+            items_cache = r.json().get("items", [])
+            print(f"CACHE ACTUALIZADA: {len(items_cache)} items")
+        except Exception as e:
+            print(f"ERROR CACHE: {e}")
+        time.sleep(600)  # Cada 10 minutos
 
-# Cargar al arrancar
-cargar_productos()
+# Iniciar actualización en segundo plano
+threading.Thread(target=refresh_cache, daemon=True).start()
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -65,22 +60,12 @@ TOOLS = {
         {
             "name": "consultar_stock",
             "description": "Stock de un producto por SKU exacto.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "sku": {"type": "string"}
-                }
-            }
+            "inputSchema": {"type": "object", "properties": {"sku": {"type": "string"}}}
         },
         {
             "name": "productos_stock_bajo",
             "description": "Productos con menos de 10 unidades.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "limite": {"type": "integer", "default": 50}
-                }
-            }
+            "inputSchema": {"type": "object", "properties": {"limite": {"type": "integer", "default": 50}}}
         },
         {
             "name": "resumen_inventario",
@@ -127,8 +112,7 @@ async def messages(request: Request):
     
     if method == "initialize":
         r = {"jsonrpc": "2.0", "id": mid, "result": {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {"tools": {}},
+            "protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
             "serverInfo": {"name": "Zoho Inventory", "version": "1.0.0"}
         }}
     elif method == "tools/list":
@@ -137,40 +121,36 @@ async def messages(request: Request):
         args = body.get("params", {}).get("arguments", {})
         name = body.get("params", {}).get("name", "").replace("mcp_", "")
         
-        items = items_cache
-        
         if name == "buscar_productos":
             kw = args.get("keyword", "").lower()
             sk = args.get("sku", "").lower()
             lim = args.get("limite", 20)
-            res = items
+            res = items_cache
             if kw:
-                res = [i for i in res if kw in i.get("name", "").lower() or kw in i.get("sku", "").lower()]
+                res = [i for i in res if kw in i.get("name","").lower() or kw in i.get("sku","").lower()]
             if sk:
-                res = [i for i in res if sk in i.get("sku", "").lower()]
+                res = [i for i in res if sk in i.get("sku","").lower()]
             res = res[:lim]
         elif name == "consultar_stock":
             sk = args.get("sku", "").lower()
-            res = [i for i in items if i.get("sku", "").lower() == sk]
+            res = [i for i in items_cache if i.get("sku","").lower() == sk]
             if not res:
                 res = {"error": f"No se encontró: {sk}"}
         elif name == "productos_stock_bajo":
             lim = args.get("limite", 50)
-            res = [i for i in items if i.get("stock_on_hand", 0) < 10][:lim]
+            res = [i for i in items_cache if i.get("stock_on_hand",0) < 10][:lim]
         elif name == "resumen_inventario":
             res = {
-                "total_productos": len(items),
-                "total_stock": sum(i.get("stock_on_hand", 0) for i in items),
-                "valor_total": round(sum(i.get("stock_on_hand", 0) * i.get("rate", 0) for i in items), 2)
+                "total_productos": len(items_cache),
+                "total_stock": sum(i.get("stock_on_hand",0) for i in items_cache),
+                "valor_total": round(sum(i.get("stock_on_hand",0)*i.get("rate",0) for i in items_cache),2)
             }
         else:
-            res = {"error": f"Herramienta no encontrada: {name}"}
+            res = {"error": f"No encontrada: {name}"}
         
-        r = {"jsonrpc": "2.0", "id": mid, "result": {
-            "content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]
-        }}
+        r = {"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": json.dumps(res, indent=2, ensure_ascii=False)}]}}
     else:
-        r = {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "Method not found"}}
+        r = {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "?"}}
     
     if sid in sessions:
         await sessions[sid].put(json.dumps(r))
