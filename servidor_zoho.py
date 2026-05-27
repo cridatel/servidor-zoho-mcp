@@ -26,7 +26,9 @@ def get_access_token():
         "grant_type": "refresh_token"
     }
     response = requests.post(url, params=params)
-    return response.json().get("access_token")
+    token = response.json().get("access_token")
+    print(f"=== TOKEN: {token[:20]}... ===")
+    return token
 
 # 3. LLAMADA GENÉRICA A LA API DE ZOHO
 def zoho_api(endpoint, params=None):
@@ -37,8 +39,12 @@ def zoho_api(endpoint, params=None):
         "orgId": ZOHO_ORG_ID
     }
     url = f"{ZOHO_API_DOMAIN}/inventory/v1/{endpoint}"
+    print(f"=== ZOHO URL: {url} ===")
     response = requests.get(url, headers=headers, params=params)
-    return response.json()
+    data = response.json()
+    print(f"=== ZOHO RESPONSE ({response.status_code}) ===")
+    print(json.dumps(data, indent=2)[:500])
+    return data
 
 # 4. APP FASTAPI
 app = FastAPI()
@@ -162,11 +168,14 @@ async def messages(request: Request):
                     items = [i for i in items if sku.lower() in i.get("sku", "").lower()]
                 results = items[:limite]
             else:
-                results = {"error": "No se pudieron obtener productos"}
+                results = {"error": "No se pudieron obtener productos", "raw": data}
         
         elif tool_name == "consultar_stock":
             sku = arguments.get("sku", "")
             data = zoho_api(f"items?sku={sku}")
+            
+            print("=== CONSULTAR STOCK DATA ===")
+            print(json.dumps(data, indent=2)[:500])
             
             if "items" in data and len(data["items"]) > 0:
                 item = data["items"][0]
@@ -177,7 +186,7 @@ async def messages(request: Request):
                     "precio": item.get("rate")
                 }]
             else:
-                results = {"error": f"No se encontró el SKU: {sku}"}
+                results = {"error": f"No se encontró el SKU: {sku}", "raw": data}
         
         elif tool_name == "productos_stock_bajo":
             limite = arguments.get("limite", 50)
@@ -187,7 +196,7 @@ async def messages(request: Request):
                 items = [i for i in data["items"] if i.get("stock_on_hand", 0) < 10]
                 results = items[:limite]
             else:
-                results = {"error": "No se pudieron obtener productos"}
+                results = {"error": "No se pudieron obtener productos", "raw": data}
         
         elif tool_name == "resumen_inventario":
             data = zoho_api("items", params={"organization_id": ZOHO_ORG_ID})
@@ -204,7 +213,7 @@ async def messages(request: Request):
                     "valor_total_inventario": round(valor_total, 2)
                 }
             else:
-                results = {"error": "No se pudieron obtener datos"}
+                results = {"error": "No se pudieron obtener datos", "raw": data}
         
         else:
             results = {"error": f"Herramienta no encontrada: {tool_name}"}
